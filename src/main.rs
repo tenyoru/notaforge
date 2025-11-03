@@ -10,15 +10,15 @@ use ankiconnect_rs::{
 use anyhow::{Result, anyhow};
 use card_template::{CardFields, CardTemplate, SimpleCard, VocabularyCard};
 use clap::{Parser, ValueEnum};
-use std::path::PathBuf;
+use std::{env, path::PathBuf};
 use vocab_service::build_vocabulary_card;
 
 #[derive(Parser)]
 #[command(author, version, about, long_about = None)]
 struct Args {
     /// Path to the configuration file (TOML)
-    #[arg(long, default_value = "notaforge.toml")]
-    config: PathBuf,
+    #[arg(long)]
+    config: Option<PathBuf>,
 
     /// Name of the Anki deck to use
     #[arg(short, long)]
@@ -62,7 +62,24 @@ enum TemplateKind {
 #[tokio::main]
 async fn main() -> Result<()> {
     let args = Args::parse();
-    let config = config::load(&args.config)?;
+
+    let config_path = args
+        .config
+        .clone()
+        .or_else(|| env::var_os("NOTAFORGE_CONFIG").map(PathBuf::from))
+        .or_else(|| {
+            env::var_os("XDG_CONFIG_HOME")
+                .map(PathBuf::from)
+                .map(|base| base.join("notaforge/config.toml"))
+        })
+        .or_else(|| {
+            env::var_os("HOME")
+                .map(PathBuf::from)
+                .map(|home| home.join(".config/notaforge/config.toml"))
+        })
+        .unwrap_or_else(|| PathBuf::from("notaforge.toml"));
+
+    let config = config::load(&config_path)?;
 
     let deck_name = args
         .deck
