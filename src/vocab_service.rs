@@ -9,14 +9,18 @@ use crate::card_template::{ExampleSentence, VocabularyCard};
 
 const DICTIONARY_ENDPOINT: &str = "https://api.dictionaryapi.dev/api/v2/entries/en/";
 const DATAMUSE_ENDPOINT: &str = "https://api.datamuse.com/words";
-const DEFAULT_TRANSLATE_BASE: &str = "https://lingva.ml/api/v1";
+const DEFAULT_TRANSLATE_BASES: &[&str] = &[
+    "https://lingva.ml/api/v1",
+    "https://lingva.garudalinux.org/api/v1",
+    "https://translate.plausible.stream/api/v1",
+];
 
 pub async fn build_vocabulary_card(
     client: &Client,
     term: &str,
     source_lang: &str,
     target_lang: &str,
-    translate_base: Option<&str>,
+    translate_bases: &[String],
     translate_retries: u32,
     translate_backoff_ms: u64,
 ) -> Result<VocabularyCard> {
@@ -34,6 +38,16 @@ pub async fn build_vocabulary_card(
     let part_of_speech = dictionary.part_of_speech.unwrap_or_default();
     let pronunciation = dictionary.pronunciation.unwrap_or_default();
 
+    let base_candidates: Vec<String> = if translate_bases.is_empty() {
+        DEFAULT_TRANSLATE_BASES
+            .iter()
+            .map(|base| base.to_string())
+            .collect()
+    } else {
+        translate_bases.iter().cloned().collect()
+    };
+    let base_slice = &base_candidates;
+
     let synonyms_joined = synonyms.join(", ");
     let translated_synonyms = if synonyms_joined.is_empty() {
         String::new()
@@ -44,7 +58,7 @@ pub async fn build_vocabulary_card(
                 synonym,
                 source_lang,
                 target_lang,
-                translate_base,
+                base_slice,
                 translate_retries,
                 translate_backoff_ms,
             )
@@ -71,7 +85,7 @@ pub async fn build_vocabulary_card(
             term,
             source_lang,
             target_lang,
-            translate_base,
+            base_slice,
             translate_retries,
             translate_backoff_ms,
         ),
@@ -80,15 +94,22 @@ pub async fn build_vocabulary_card(
             &definition_text,
             source_lang,
             target_lang,
-            translate_base,
+            base_slice,
             translate_retries,
             translate_backoff_ms,
         )
     );
 
-    let translation = translation_res.with_context(|| format!("failed to translate '{term}'"))?;
+    let translation = match translation_res {
+        Ok(value) if !value.trim().is_empty() => value,
+        Ok(_) => term.to_string(),
+        Err(_) => term.to_string(),
+    };
 
-    let translated_usage = usage_res.unwrap_or(definition_text.clone());
+    let translated_usage = match usage_res {
+        Ok(value) if !value.trim().is_empty() => value,
+        _ => definition_text.clone(),
+    };
 
     let example_sentence = dictionary
         .example
@@ -188,7 +209,50 @@ async fn translate_text(
     text: &str,
     source_lang: &str,
     target_lang: &str,
-    translate_base: Option<&str>,
+    translate_bases: &[String],
+    retries: u32,
+    backoff_ms: u64,
+) -> Result<String> {
+    if text.trim().is_empty() {
+        return Ok(String::new());
+    }
+
+    let base_candidates: Vec<String> = if translate_bases.is_empty() {
+        DEFAULT_TRANSLATE_BASES
+            .iter()
+            .map(|base| base.to_string())
+            .collect()
+    } else {
+        translate_bases.iter().cloned().collect()
+    };
+
+    for base in base_candidates {
+        match translate_with_base(
+            client,
+            text,
+            source_lang,
+            target_lang,
+            &base,
+            retries,
+            backoff_ms,
+        )
+        .await
+        {
+            Ok(result) if !result.trim().is_empty() => return Ok(result),
+            Ok(_) => continue,
+            Err(_err) => continue,
+        }
+    }
+
+    Ok(String::new())
+}
+
+async fn translate_with_base(
+    client: &Client,
+    text: &str,
+    source_lang: &str,
+    target_lang: &str,
+    base: &str,
     retries: u32,
     backoff_ms: u64,
 ) -> Result<String> {
@@ -201,7 +265,6 @@ async fn translate_text(
         translation: String,
     }
 
-    let base = translate_base.unwrap_or(DEFAULT_TRANSLATE_BASE);
     let base = base.trim_end_matches('/');
     let url = format!(
         "{}/{}/{}/{}",
@@ -229,12 +292,25 @@ async fn translate_text(
                     }
                 }
 
-                let resp = resp.error_for_status().context("Lingva returned error")?;
-                let parsed: LingvaResponse = resp
-                    .json()
-                    .await
-                    .context("Lingva response parsing failed")?;
-                return Ok(parsed.translation);
+                match resp.error_for_status() {
+                    Ok(success) => {
+                        let parsed: LingvaResponse = success
+                            .json()
+                            .await
+                            .context("Lingva response parsing failed")?;
+                        return Ok(parsed.translation);
+                    }
+                    Err(err) => {
+                        if attempt < retries {
+                            tokio::time::sleep(std::time::Duration::from_millis(delay)).await;
+                            attempt += 1;
+                            delay = (delay as f64 * 1.5).round() as u64;
+                            continue;
+                        } else {
+                            return Err(err).context("Lingva returned error");
+                        }
+                    }
+                }
             }
             Err(err) => {
                 if attempt < retries {

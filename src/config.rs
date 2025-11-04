@@ -12,7 +12,10 @@ pub struct AppConfig {
     pub target_lang: Option<String>,
     #[serde(default)]
     pub extra_tags: Vec<String>,
-    pub translation_base: Option<String>,
+    #[serde(default)]
+    pub translation_bases: Vec<String>,
+    #[serde(default, rename = "translation_base")]
+    pub legacy_translation_base: Option<String>,
     pub translate_retries: Option<u32>,
     pub translate_backoff_ms: Option<u64>,
 }
@@ -34,6 +37,27 @@ pub fn load(path: &Path) -> Result<AppConfig> {
         .map(|tag| tag.trim().to_string())
         .filter(|tag| !tag.is_empty())
         .collect();
+
+    config.translation_bases = config
+        .translation_bases
+        .into_iter()
+        .map(|base| base.trim().to_string())
+        .filter(|base| !base.is_empty())
+        .collect();
+
+    if let Some(base) = config
+        .legacy_translation_base
+        .as_ref()
+        .map(|base| base.trim())
+        .filter(|base| !base.is_empty())
+    {
+        if !config.translation_bases.iter().any(|b| b == base) {
+            config.translation_bases.push(base.to_string());
+        }
+        config.legacy_translation_base = Some(base.to_string());
+    } else {
+        config.legacy_translation_base = None;
+    }
 
     Ok(config)
 }
@@ -75,8 +99,8 @@ translate_backoff_ms = 750
         assert_eq!(config.source_lang.as_deref(), Some("en"));
         assert_eq!(config.target_lang.as_deref(), Some("es"));
         assert_eq!(
-            config.translation_base.as_deref(),
-            Some("https://example.com")
+            config.translation_bases,
+            vec!["https://example.com".to_string()]
         );
         assert_eq!(config.translate_retries, Some(3));
         assert_eq!(config.translate_backoff_ms, Some(750));

@@ -123,6 +123,14 @@ async fn main() -> Result<()> {
             .unwrap_or(args.translate_backoff_ms),
     );
 
+    let translation_bases = if !config.translation_bases.is_empty() {
+        config.translation_bases.clone()
+    } else if let Some(base) = config.legacy_translation_base.clone() {
+        vec![base]
+    } else {
+        Vec::new()
+    };
+
     let client = AnkiClient::new();
     let deck = find_deck(&client, &deck_name)?;
     let model = find_model(&client, &model_name)?;
@@ -148,7 +156,7 @@ async fn main() -> Result<()> {
         &args.term,
         &source_lang,
         &target_lang,
-        config.translation_base.as_deref(),
+        &translation_bases,
         translate_retries,
         translate_backoff_ms,
     )
