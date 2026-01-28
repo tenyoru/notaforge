@@ -9,6 +9,7 @@ use crate::card_template::{ExampleSentence, VocabularyCard};
 
 const DICTIONARY_ENDPOINT: &str = "https://api.dictionaryapi.dev/api/v2/entries/en/";
 const DATAMUSE_ENDPOINT: &str = "https://api.datamuse.com/words";
+const TATOEBA_ENDPOINT: &str = "https://tatoeba.org/en/api_v0/search";
 const DEFAULT_TRANSLATE_BASES: &[&str] = &[
     "https://lingva.ml/api/v1",
     "https://lingva.garudalinux.org/api/v1",
@@ -111,9 +112,12 @@ pub async fn build_vocabulary_card(
         _ => definition_text.clone(),
     };
 
-    let example_sentence = dictionary
-        .example
-        .unwrap_or_else(|| format!("This sentence uses the word {term}."));
+    let example_sentence = match dictionary.example {
+        Some(ex) => ex,
+        None => fetch_tatoeba_example(client, term)
+            .await
+            .unwrap_or_default(),
+    };
 
     let highlight = if example_sentence.contains(term) {
         term.to_string()
@@ -165,7 +169,7 @@ async fn fetch_dictionary_entry(client: &Client, term: &str) -> Result<Dictionar
 
     let meaning = entry
         .meanings
-        .into_iter()
+        .iter()
         .find(|meaning| !meaning.definitions.is_empty())
         .ok_or_else(|| anyhow!("Dictionary missing definitions for '{term}'"))?;
 
@@ -175,13 +179,18 @@ async fn fetch_dictionary_entry(client: &Client, term: &str) -> Result<Dictionar
         .iter()
         .find_map(|def| (!def.definition.is_empty()).then(|| def.definition.clone()));
 
-    let example = definitions.iter().find_map(|def| def.example.clone());
+    // Search ALL meanings for an example, not just the first one
+    let example = entry
+        .meanings
+        .iter()
+        .flat_map(|m| m.definitions.iter())
+        .find_map(|def| def.example.clone());
 
-    let synonyms = collect_synonyms(&definitions, meaning.synonyms);
+    let synonyms = collect_synonyms(&definitions, meaning.synonyms.clone());
 
     Ok(DictionaryData {
         pronunciation,
-        part_of_speech: meaning.part_of_speech,
+        part_of_speech: meaning.part_of_speech.clone(),
         definition,
         example,
         synonyms,
@@ -202,6 +211,27 @@ async fn fetch_datamuse_synonyms(client: &Client, term: &str) -> Result<Vec<Stri
         .context("Datamuse response parsing failed")?;
 
     Ok(response.into_iter().map(|entry| entry.word).collect())
+}
+
+async fn fetch_tatoeba_example(client: &Client, term: &str) -> Result<String> {
+    let response: TatoebaResponse = client
+        .get(TATOEBA_ENDPOINT)
+        .query(&[("from", "eng"), ("query", term), ("limit", "1")])
+        .send()
+        .await
+        .context("Tatoeba request failed")?
+        .error_for_status()
+        .context("Tatoeba returned error")?
+        .json()
+        .await
+        .context("Tatoeba response parsing failed")?;
+
+    response
+        .results
+        .into_iter()
+        .next()
+        .map(|r| r.text)
+        .ok_or_else(|| anyhow!("No Tatoeba example for '{term}'"))
 }
 
 async fn translate_text(
@@ -374,6 +404,17 @@ struct Definition {
 #[derive(Deserialize)]
 struct DatamuseEntry {
     word: String,
+}
+
+#[derive(Deserialize)]
+struct TatoebaResponse {
+    #[serde(default)]
+    results: Vec<TatoebaSentence>,
+}
+
+#[derive(Deserialize)]
+struct TatoebaSentence {
+    text: String,
 }
 
 #[derive(Default)]

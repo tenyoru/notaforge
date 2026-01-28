@@ -4,3 +4,4 @@ template = "vocabulary"
 source_lang = "en"
 target_lang = "ru"
 extra_tags = ["notaforge"]
+translation_bases = ["https://translate.plausibility.cloud/api/v1", "https://lingva.lunar.icu/api/v1"]
